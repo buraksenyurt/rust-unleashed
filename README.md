@@ -6,6 +6,7 @@ Bir dili iyi bildiğinize nasıl karar verirsiniz? Çeşitli algoritma soruları
 - [Her Const Kullanımı Yeni Bir Geçici Kopya Demek mi?](#her-const-kullanımı-yeni-bir-geçici-kopya-demek-mi-adventure_01)
 - [Zero Sized Types ve Assignment Expression ile Unit Type İlişkisi](#zero-sized-types-ve-assignment-expression-ile-unit-type-i̇lişkisi-adventure_02)
 - [let-binding Senaryolarında Yaşam Süreleri](#let-binding-senaryolarında-yaşam-süreleri-adventure_03)
+- [Birden Fazla Mutable Referansta Israr Etmek](#birden-fazla-mutable-referansta-israr-etmek-adventure_04)
 
 ## Scope Kavramı ve Ignore Binding Meselesi (adventure_00)
 
@@ -562,6 +563,114 @@ For more information about this error, try `rustc --explain E0509`.
 ```
 
 Bu hata mesajı son derece anlamlıdır. Zira eşitliğin sağ tarafındaki **Process** tanımında yer alan **name** alanını dışarıya almak istediğimiz ama Process'in kendisinin Drop edilmeye çalışıldığı bir durum söz konusudur. Bu nedenle derleyici **bind** işlemi sırasında **name** alanını **ref** ile ödünç almayı önerir.
+
+## Birden Fazla Mutable Referansta Israr Etmek (adventure_04)
+
+Rust derleme zamanı kuralları gereği aynı anda birden fazla **mutable** referansa sahip olmak mümkün değildir. İstediğimiz kadar immutable referans ataması yapabilsek te t anında sadece tek bir mutable referans olması istenir. Aynı veriyi referans edenlerin bu veriyi değiştirebiliyor olması verinin tutarlığı için bir sorundur. Genellikle **Data Races** olarak da bildiğimiz bu durum Rust'ı öğrenmeye başladığımızda sıklıkla da karşımıza çıkar. Ancak ısrarcı olabilir ve kuralı ihlal edebilirsiniz. Başlamadan önce ihlal durumunu aşağıdaki kod parçası ile kısaca hatırlamaya çalışalım.
+
+```rust
+fn main() {
+    let mut jump = Jump { value: 100 };
+
+    let ref_1 = &mut jump;
+    let ref_2 = &mut jump;
+}
+
+struct Jump {
+    value: u32,
+}
+```
+
+**Jump** isimli veri yapısından tanımladığımız değişken için iki adet **mutable** referans tanımı var. Kodu bu şekilde derlediğimizde herhangi bir sorunla karşılaşmayız. Sorun bu **ref_1** üzerinden veriyi değiştirmek istediğimizde oluşur. Tek bir satır ile derleme zamanı hatasını kolayca alabiliriz.
+
+```rust
+fn main() {
+    let mut jump = Jump { value: 100 };
+
+    let ref_1 = &mut jump;
+    let ref_2 = &mut jump;
+
+    (*ref_1).value = 90;
+}
+
+struct Jump {
+    value: u32,
+}
+```
+
+**ref_1** referansı üzerinden **value** değerine ulaşıp değiştirme istedik. Ancak aynı veriyi **mutable** olarak referans etmekte olan bir başkası var *(ref_2)*. Bu nedenle rust derleyicisi aşağıdaki tepkiyi verecektir.
+
+![rust_adventure_09.png](images/rust_adventure_09.png)
+
+Fakat istersek **Neo** gibi kuralları esnetebiliriz *(Morpehus'un da dediği gibi; Do you think that's air you're breathing now?)* Şöyle ki; **raw pointer**'lara ait referansları dışarıya çıkartıp **unsafe** bölgede kullanabilir ve **Data Race** ihlalini göz ardı edebiliriz. Aynı kodu aşağıdaki gibi değiştirelim.
+
+```rust
+fn main() {
+    let mut jump = Jump { value: 100 };
+
+    let ref_1 = &mut jump as *mut Jump;
+    let ref_2 = &mut jump as *mut Jump;
+
+    unsafe {
+        println!("ref 1 address: {:?}, ref 2 address: {:?}", ref_1, ref_2);
+        (*ref_2).value = 90;
+        (*ref_1).value = 75;
+        println!(
+            "ref_1.value: {}, ref_2.value: {}",
+            (*ref_1).value,
+            (*ref_2).value
+        );
+    }
+}
+
+struct Jump {
+    value: u32,
+}
+```
+
+**ref_1** ve **ref_2** referanslarını yine **mutable** olarak ele alırken bu sefer **raw pointer**'lara dönüştürüyoruz. Bu tamamen güvensiz bir yaklaşım zira kodu **unsafe** blok kullanmadan derlersek **error[E0133]: dereference of raw pointer is unsafe and requires unsafe block** hatası ile karşılaşırız. Dolayısıya * operatörü ile pointer referansları üzerinden veriye erişmek istediğimizi derleyiciye açıkça ifade etmemiz bekleniyor. Yani riskleri kasıtlı olarak göze aldığımızı açıkça söylemeliyiz. Koddaki her iki referansta aynı veri bölgesini işaret ettiğinden doğal olarak birisi üzerinden yapılacak veri değişikliği diğerine de yansıyor ve dolayısıyla en son kim değiştirdiyse yarışı o kazanıyor. Kodun çalışma zamanı çıktısı aşağıdaki gibidir.
+
+![rust_adventure_10.png](images/rust_adventure_10.png)
+
+Şimdi olayı farklı bir boyuta taşıyalım. İşin içerisine bize hep sürprizler yapan sıfır boyutlu veri yapılarını *(Zero Sized Types)* katalım.
+
+```rust
+fn main() {
+    let [j1, j2] = &mut [Jump { value: 100 }, Jump { value: 50 }];
+
+    let j1 = j1 as *mut Jump;
+    let j2: *mut Jump = j2 as *mut Jump;
+
+    println!("Size of Jump Array is {}", std::mem::size_of::<[Jump; 2]>());
+    println!("Size of Jump struct is {}", std::mem::size_of::<Jump>());
+    println!("j1 address: {:?}, j2 address: {:?}", j1, j2);
+
+    let [e1, e2] = &mut [Entity, Entity];
+
+    let e1 = e1 as *mut Entity;
+    let e2 = e2 as *mut Entity;
+
+    println!();
+    println!(
+        "Size of Entity Array is {}",
+        std::mem::size_of::<[Entity; 2]>()
+    );
+    println!("Size of Entity struct is {}", std::mem::size_of::<Entity>());
+    println!("e1 address: {:?}, e2 address: {:?}", e1, e2);
+}
+
+struct Entity;
+
+struct Jump {
+    value: u32,
+}
+```
+
+Örnek kodda, **Jump** ve **Entity** türlerinden birer array kullanıyoruz. Dizi değerleri yine mutable referanslar olarak değişkenlere alınıyor. Daha önceden de bahsettiğimiz gibi **ZST** türleri derleme zamanına ait türler ve çalışma zamanı için bir anlam ifade etmiyorlar. Tanımladığımız **Entity** yapısı da böyle bir tür ve içerisinde değiştirilebilir hiçbir veri taşımıyor. Buna göre oluşturulan dizinin başlangıç adresi neresi ise **e1** ve **e2** referansları için de aynı adres kullanılıyor. Oysa ki **Jump** türünden değişkenlerin yer aldığı dizi içinden çektiğimiz referansların adresleri birbirlerinden farklı. Array dizilimine göre **u32** boyutu kadar ötelenmiş birer adres olduğunu söyleyebiliriz ki örneği çalıştırdığımız zaman elde ettiğimi adresler arasındaki fark, **0x40c6cff72c - 0x40c6cff728 = 0x4** yani **4 byte**'tır. Zira **u32** türü **4** byte yer kaplar ve **Jump** isimli struct içerisinde sadece bu veri türünü kullanıyoruz. Kodun çalışma zamanı çıktısı aşağıdaki gibidir.
+
+![rust_adventure_11.png](images/rust_adventure_11.png)
+
+Aslında **Zero Sized Type** formuna uyan veri yapılarının kullanıldığı senaryolarda sahiplik kurallarını ihlal etmeden birden fazla mutable referansın söz konusu olabileceğini ifade etsek yeridir lakin mutable olma hali veriyi değiştirmek istediğimiz zaman anlam kazanır. Herhangi bir veri içermeyen bir yapıyı neden mutable referans olarak kullanmak isteyelim ki?
 
 ## Kaynaklar
 
